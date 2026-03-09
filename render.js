@@ -97,14 +97,31 @@ export async function renderToWav(events, opts) {
   return encodeWav(audioBuffer);
 }
 
+// Persistent AudioContext for gapless looping
+let _sharedCtx = null;
+
+function getSharedContext() {
+  if (!_sharedCtx || _sharedCtx.state === "closed") {
+    _sharedCtx = new AudioContext();
+  }
+  return _sharedCtx;
+}
+
+export async function closeContext() {
+  if (_sharedCtx) {
+    await _sharedCtx.close();
+    _sharedCtx = null;
+  }
+}
+
 export async function playRealtime(events, opts) {
   const { bpm, cycles, defaultWave } = opts;
   const cycleDuration = (4 * 60) / bpm;
   const totalDuration = cycles * cycleDuration;
 
-  const ctx = new AudioContext();
+  const ctx = getSharedContext();
 
-  const baseTime = ctx.currentTime + 0.1; // small buffer to avoid glitches
+  const baseTime = ctx.currentTime + 0.05;
 
   for (const event of events) {
     if (!event.whole) continue;
@@ -159,9 +176,136 @@ export async function playRealtime(events, opts) {
     osc.stop(endSec + 0.01);
   }
 
-  // Wait for playback to finish
-  await new Promise((resolve) => setTimeout(resolve, totalDuration * 1000 + 200));
-  await ctx.close();
+  // Wait for playback to finish — timed precisely to the music duration
+  const endTime = baseTime + totalDuration;
+  const waitMs = (endTime - ctx.currentTime) * 1000;
+  if (waitMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+}
+
+// Schedule events onto a context at a given absolute start time
+function scheduleEvents(ctx, events, baseTime, opts) {
+  const { bpm, cycles, defaultWave } = opts;
+  const cycleDuration = (4 * 60) / bpm;
+  const totalDuration = cycles * cycleDuration;
+
+  for (const event of events) {
+    if (!event.whole) continue;
+
+    const startSec = baseTime + event.whole.begin.valueOf() * cycleDuration;
+    const endSec = baseTime + event.whole.end.valueOf() * cycleDuration;
+    const duration = endSec - startSec;
+
+    if (duration <= 0 || startSec >= baseTime + totalDuration) continue;
+
+    const vals = getEventValue(event);
+    const noteVal = vals.note ?? vals.n ?? vals.freq;
+    if (noteVal == null) continue;
+
+    const freq = vals.freq ? vals.freq : noteToFreq(noteVal);
+    if (!freq || freq <= 0) continue;
+
+    const VALID_WAVES = ["square", "triangle", "sawtooth", "sine"];
+    const soundVal = vals.s ?? vals.sound ?? vals.wave ?? vals.waveform;
+    const wave = VALID_WAVES.includes(soundVal) ? soundVal : defaultWave;
+    const gain = vals.gain ?? vals.velocity ?? 0.3;
+    const attack = vals.attack ?? 0.005;
+    const decay = vals.decay ?? 0.1;
+    const sustain = vals.sustain ?? 0.6;
+    const release = vals.release ?? 0.05;
+
+    const osc = ctx.createOscillator();
+    osc.type = wave;
+    osc.frequency.value = freq;
+
+    const gainNode = ctx.createGain();
+    gainNode.gain.setValueAtTime(0, startSec);
+    gainNode.gain.linearRampToValueAtTime(gain, startSec + Math.min(attack, duration * 0.3));
+
+    const decayStart = startSec + attack;
+    const sustainLevel = gain * sustain;
+    if (decayStart < endSec) {
+      gainNode.gain.linearRampToValueAtTime(
+        sustainLevel,
+        Math.min(decayStart + decay, endSec)
+      );
+    }
+
+    const releaseStart = endSec - Math.min(release, duration * 0.3);
+    gainNode.gain.setValueAtTime(sustainLevel, releaseStart);
+    gainNode.gain.linearRampToValueAtTime(0, endSec);
+
+    osc.connect(gainNode);
+    gainNode.connect(ctx.destination);
+
+    osc.start(startSec);
+    osc.stop(endSec + 0.01);
+  }
+}
+
+// Gapless looping with hot-reload support
+// Watches /tmp/strudel-cli-pattern.json for pattern changes
+export async function playLoop(events, opts) {
+  const { bpm, cycles } = opts;
+  const cycleDuration = (4 * 60) / bpm;
+  const loopDuration = cycles * cycleDuration;
+
+  const ctx = getSharedContext();
+  let nextStartTime = ctx.currentTime + 0.05;
+  let currentEvents = events;
+  let currentOpts = opts;
+
+  // Schedule one iteration at a time, checking for updates between each
+  function scheduleNext() {
+    scheduleEvents(ctx, currentEvents, nextStartTime, currentOpts);
+    nextStartTime += loopDuration;
+  }
+
+  // Pre-schedule 2 iterations
+  scheduleNext();
+  scheduleNext();
+
+  // Watch for pattern updates via file
+  const patternFile = "/tmp/strudel-cli-pattern.json";
+  let lastMtime = 0;
+
+  async function checkForUpdate() {
+    try {
+      const { statSync, readFileSync } = await import("fs");
+      const stat = statSync(patternFile);
+      if (stat.mtimeMs > lastMtime) {
+        lastMtime = stat.mtimeMs;
+        const data = JSON.parse(readFileSync(patternFile, "utf-8"));
+        if (data.pattern) {
+          const { evaluatePattern } = await import("./evaluate.js");
+          const pattern = await evaluatePattern(data.pattern);
+          const newCycles = data.cycles ?? cycles;
+          const newBpm = data.bpm ?? bpm;
+          const newOpts = { ...opts, bpm: newBpm, cycles: newCycles };
+          currentEvents = pattern.queryArc(0, newCycles);
+          currentOpts = newOpts;
+          console.log(`Hot-reloaded: ${currentEvents.length} events`);
+        }
+      }
+    } catch {
+      // File doesn't exist yet or invalid — that's fine
+    }
+  }
+
+  // Keep scheduling ahead forever
+  while (true) {
+    const now = ctx.currentTime;
+    // Schedule more when needed (keep 1 iteration of buffer)
+    const newLoopDuration = (currentOpts.cycles * (4 * 60)) / currentOpts.bpm;
+    while (nextStartTime - now < newLoopDuration) {
+      await checkForUpdate();
+      scheduleEvents(ctx, currentEvents, nextStartTime, currentOpts);
+      nextStartTime += newLoopDuration;
+    }
+    // Sleep half a loop duration
+    await new Promise((resolve) => setTimeout(resolve, newLoopDuration * 500));
+  }
 }
 
 function encodeWav(audioBuffer) {

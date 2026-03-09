@@ -2,7 +2,7 @@
 
 import { program } from "commander";
 import { evaluatePattern } from "./evaluate.js";
-import { renderToWav, playRealtime } from "./render.js";
+import { renderToWav, playRealtime, playLoop, closeContext } from "./render.js";
 import { writeFileSync } from "fs";
 import { resolve } from "path";
 
@@ -12,6 +12,7 @@ program
   .argument("<pattern>", 'Strudel pattern string, e.g. note("c4 e4 g4")')
   .option("-o, --output <file>", "Output WAV file path")
   .option("-p, --play", "Play in real time (no file output unless -o is also set)")
+  .option("-l, --loop", "Loop playback continuously (use with --play)")
   .option("-b, --bpm <number>", "Beats per minute", "120")
   .option("-c, --cycles <number>", "Number of cycles to render", "4")
   .option(
@@ -34,10 +35,19 @@ program
 
       console.log(`Events: ${events.length}`);
 
-      if (opts.play) {
-        console.log("Playing...");
-        await playRealtime(events, { bpm, cycles, sampleRate, defaultWave: opts.wave });
-        console.log("Done.");
+      if (opts.play || opts.loop) {
+        if (opts.loop) {
+          console.log("Looping... (Ctrl+C to stop)");
+          // Write PID file so external processes can kill us
+          writeFileSync("/tmp/strudel-cli.pid", String(process.pid));
+          process.on("SIGTERM", () => { closeContext(); process.exit(0); });
+          process.on("SIGINT", () => { closeContext(); process.exit(0); });
+          await playLoop(events, { bpm, cycles, sampleRate, defaultWave: opts.wave });
+        } else {
+          console.log("Playing...");
+          await playRealtime(events, { bpm, cycles, sampleRate, defaultWave: opts.wave });
+          console.log("Done.");
+        }
       }
 
       if (opts.output) {
@@ -52,8 +62,7 @@ program
         console.log(`Wrote ${outputPath} (${wavBuffer.byteLength} bytes)`);
       }
 
-      if (!opts.play && !opts.output) {
-        // Default: render to output.wav
+      if (!opts.play && !opts.loop && !opts.output) {
         const outputPath = resolve("output.wav");
         const wavBuffer = await renderToWav(events, {
           bpm,
