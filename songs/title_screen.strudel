@@ -1,0 +1,16 @@
+// Title Screen — C minor, NES-style, 140 BPM, 4 cycles
+// Render: strudel-cli "$(cat songs/title_screen.strudel)" -o songs/title_screen.wav -c 4 -b 140 -w square
+
+stack(
+  // Pulse 1: bass line with rests
+  note("c2 ~ c2 ~ g1 ~ g1 ~ ab1 ~ ab1 ~ bb1 ~ bb1 ~").s("square").gain(0.2),
+
+  // Pulse 2: lead melody
+  note("c4 eb4 g4 c5 bb4 g4 eb4 c4 ab3 c4 eb4 ab4 bb3 d4 f4 bb4").gain(0.25),
+
+  // Triangle: fast counter-melody
+  note("g5 ~ eb5 ~ g5 ~ eb5 c5 f5 ~ d5 ~ f5 ~ d5 bb4").fast(2).gain(0.1).s("triangle"),
+
+  // Sine: soft offbeat pad accents
+  note("~ c5 ~ c5 ~ c5 ~ c5 ~ ab4 ~ ab4 ~ bb4 ~ bb4").fast(2).gain(0.08).s("sine")
+)
