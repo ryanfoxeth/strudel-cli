@@ -2,6 +2,7 @@
   "name": "strudel-cli",
   "version": "0.1.0",
   "description": "CLI for rendering Strudel patterns to chiptune WAV files",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "bin": {
     "strudel-cli": "./cli.js"

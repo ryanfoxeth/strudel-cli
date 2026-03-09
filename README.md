@@ -73,4 +73,4 @@ The synth is intentionally simple — square, triangle, sawtooth, and sine oscil
 
 ## License
 
-MIT
+AGPL-3.0-or-later (same as Strudel)
